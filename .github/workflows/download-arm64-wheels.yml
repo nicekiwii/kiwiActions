@@ -1,70 +1,97 @@
-name: Download ARM64 Wheels on OpenEuler
+name: Download ARM64 Wheels on Ubuntu 22.04
 
-# 触发条件: 可以根据需要修改，这里设置为手动触发
+# 触发方式：手动触发
 on:
   workflow_dispatch:
 
 jobs:
-  build-and-download-wheels:
-    # 使用ARM64架构的OpenEuler-22.03环境
-    runs-on: ubuntu-latest
-    container:
-      image: openeuler/openeuler:22.03-lts-sp3
-      options: --platform linux/arm64
+  download-arm64-wheels:
+    # 使用Ubuntu 22.04作为基础系统
+    runs-on: ubuntu-22.04
+    # 启用ARM64架构支持
+    env:
+      TARGET_ARCH: aarch64
+      PYTHON_VERSION: 3.12.0
+      PIP_VERSION: 24.0
 
     steps:
-      - name: Checkout code
+      - name: Set up QEMU for ARM64 emulation
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+        # 安装QEMU模拟器以支持ARM64架构
+
+      - name: Checkout repository
         uses: actions/checkout@v4
-        # 检出代码，获取项目中的requirements.txt
+        # 检出代码仓库，获取requirements.txt文件
 
-      - name: Install necessary system packages
-        run: |
-          # 更新系统并安装必要依赖
-          dnf update -y
-          dnf install -y wget tar gcc make openssl-devel bzip2-devel libffi-devel
+      - name: Run commands in Ubuntu 22.04 ARM64 container
+        uses: addnab/docker-run-action@v3
+        with:
+          image: ubuntu:22.04
+          platform: linux/arm64
+          # 使用ARM64架构的Ubuntu 22.04容器
+          options: -v ${{ github.workspace }}:/workspace -w /workspace
+          # 将工作目录挂载到容器中，确保文件共享
 
-      - name: Install Python 3.12 from source
-        run: |
-          # 从源码编译安装指定版本的Python 3.12
-          wget https://www.python.org/ftp/python/3.12.0/Python-3.12.0.tgz
-          tar -xzf Python-3.12.0.tgz
-          cd Python-3.12.0
-          ./configure --enable-optimizations
-          make -j$(nproc)
-          make altinstall  # 使用altinstall避免覆盖系统默认Python
-          ln -s /usr/local/bin/python3.12 /usr/local/bin/python
-          ln -s /usr/local/bin/pip3.12 /usr/local/bin/pip
+          run: |
+            # 更新系统并安装必要工具
+            apt-get update && apt-get install -y \
+              wget \
+              build-essential \
+              libssl-dev \
+              zlib1g-dev \
+              libbz2-dev \
+              libreadline-dev \
+              libsqlite3-dev \
+              curl \
+              libncursesw5-dev \
+              xz-utils \
+              tk-dev \
+              libxml2-dev \
+              libxmlsec1-dev \
+              libffi-dev \
+              liblzma-dev
 
-      - name: Verify Python and pip versions
-        run: |
-          # 验证Python和pip版本是否符合要求
-          python --version
-          pip --version
-          # 确保pip版本为24.0，如果不是则升级
-          pip install --upgrade pip==24.0
+            # 下载并安装指定版本的Python
+            wget https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tgz
+            tar -xzf Python-${PYTHON_VERSION}.tgz
+            cd Python-${PYTHON_VERSION}
+            ./configure --enable-optimizations --prefix=/usr/local
+            make -j$(nproc)
+            make altinstall
 
-      - name: Create directory for wheels
-        run: |
-          # 创建目录用于存储下载的wheel包
-          mkdir -p arm64_wheels
+            # 创建Python和pip的符号链接
+            ln -s /usr/local/bin/python3.12 /usr/local/bin/python
+            ln -s /usr/local/bin/pip3.12 /usr/local/bin/pip
 
-      - name: Download ARM64 wheels
-        run: |
-          # 下载requirements.txt中所有依赖的ARM64版本wheel包
-          # --only-binary=:all: 确保只下载二进制wheel包
-          # --platform manylinux2014_aarch64 指定ARM64平台
-          # -d 指定下载目录
-          pip download --only-binary=:all: --platform manylinux2014_aarch64 -r requirements.txt -d arm64_wheels/
+            # 验证Python版本
+            echo "Python version:"
+            python --version
+            
+            # 升级到指定版本的pip
+            pip install --upgrade pip==${PIP_VERSION}
+            echo "Pip version:"
+            pip --version
 
-      - name: Package wheels
-        run: |
-          # 将所有wheel包打包成tar.gz文件，方便上传
-          tar -czf arm64_wheels_$(date +%Y%m%d_%H%M%S).tar.gz arm64_wheels/
+            # 创建存储wheel包的目录
+            mkdir -p arm64_wheels
 
-      - name: Upload wheel package
+            # 从requirements.txt下载所有ARM64架构的wheel包
+            pip download \
+              --only-binary=:all: \
+              --platform manylinux2014_aarch64 \
+              -r requirements.txt \
+              -d arm64_wheels/
+
+            # 打包wheel文件
+            tar -czf ubuntu2204_arm64_wheels_$(date +%Y%m%d_%H%M%S).tar.gz arm64_wheels/
+
+      - name: Upload wheel package as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: openeuler-arm64-python-wheels
+          name: ubuntu2204-arm64-python-wheels
           path: ./*.tar.gz
-          # 保留Artifact 30天，可根据需要调整
           retention-days: 30
+          # 保存30天，可在Actions结果页面获取下载链接
+    
