@@ -1,52 +1,111 @@
-name: Download and Package Python Wheels
+name: Download ARM64 Python Wheels
 
 on:
-  workflow_dispatch:  # 允许手动触发工作流
+  workflow_dispatch:  # 允许手动触发
   push:
-    paths:
-      - 'requirements.txt'  # 当requirements.txt变更时自动触发
+    branches: [ main, master ]
+    paths: [ 'requirements.txt' ]  # 当 requirements.txt 变更时触发
+  pull_request:
+    branches: [ main, master ]
+    paths: [ 'requirements.txt' ]
 
 jobs:
   download-wheels:
-    name: Download ARM64 Python Wheels
-    runs-on: ubuntu-22.04
-    # 使用arm64架构
-    container:
-      image: ubuntu:22.04
-      options: --platform linux/arm64
-
+    runs-on: ubuntu-22.04-arm  # 使用 ARM64 架构的 Ubuntu 22.04
+    
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v3
-        with:
-          python-version: "3.12"
-
-      - name: Install pip and wheel
-        run: |
-          python -m pip install --upgrade pip
-          pip install wheel
-
-      - name: Create wheels directory
-        run: mkdir -p wheels
-
-      - name: Download ARM64 wheels
-        run: |
-          # 读取requirements.txt并下载所有依赖的arm64 wheel包
-          pip download --only-binary=:all: --platform manylinux2014_aarch64 \
-            --implementation cp --python-version 3.12 --abi cp312 \
-            -r requirements.txt -d wheels/
-
-      - name: Package wheels
-        run: |
-          # 将所有wheel包打包成zip文件
-          zip -r python-wheels-arm64.zip wheels/
-
-      - name: Upload wheels as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: python-wheels-arm64
-          path: python-wheels-arm64.zip
-          retention-days: 30  # 保留30天供下载
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.12"
+        
+    - name: Upgrade pip
+      run: |
+        python -m pip install --upgrade pip
+        pip install wheel setuptools
+        
+    - name: Create wheels directory
+      run: mkdir -p wheels
+      
+    - name: Download ARM64 wheels
+      run: |
+        # 检查 requirements.txt 是否存在
+        if [ ! -f "requirements.txt" ]; then
+          echo "❌ requirements.txt not found!"
+          exit 1
+        fi
+        
+        echo "📦 Downloading ARM64 wheels for packages in requirements.txt..."
+        
+        # 下载所有依赖包的 ARM64 wheel 文件
+        pip download \
+          --only-binary=:all: \
+          --platform linux_aarch64 \
+          --platform manylinux_2_28_aarch64 \
+          --platform manylinux2014_aarch64 \
+          --dest ./wheels \
+          -r requirements.txt
+        
+        echo "✅ Download completed!"
+        
+    - name: List downloaded wheels
+      run: |
+        echo "📋 Downloaded wheels:"
+        ls -la ./wheels/ || echo "No wheels downloaded"
+        
+    - name: Create wheels archive
+      run: |
+        # 创建时间戳用于归档文件名
+        TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+        
+        # 创建 tar.gz 归档
+        tar -czf python_arm64_wheels_${TIMESTAMP}.tar.gz -C ./wheels .
+        
+        # 创建 zip 归档（备用）
+        cd ./wheels && zip -r ../python_arm64_wheels_${TIMESTAMP}.zip . && cd ..
+        
+        echo "ARCHIVE_NAME=python_arm64_wheels_${TIMESTAMP}" >> $GITHUB_ENV
+        
+    - name: Upload wheels archive
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.ARCHIVE_NAME }}
+        path: |
+          ${{ env.ARCHIVE_NAME }}.tar.gz
+          ${{ env.ARCHIVE_NAME }}.zip
+        retention-days: 30
+        
+    - name: Generate download info
+      run: |
+        echo "## 📦 ARM64 Python Wheels Download" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📋 Requirements File Used:" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        cat requirements.txt >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🗂️ Downloaded Wheels:" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        ls -1 ./wheels/ | while read file; do
+          echo "- $file" >> $GITHUB_STEP_SUMMARY
+        done
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### ⬇️ Download Links:" >> $GITHUB_STEP_SUMMARY
+        echo "- **Tar.gz Archive**: Available in Artifacts section below" >> $GITHUB_STEP_SUMMARY
+        echo "- **Zip Archive**: Available in Artifacts section below" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🔧 Platform Info:" >> $GITHUB_STEP_SUMMARY
+        echo "- **System**: Ubuntu 22.04 ARM64" >> $GITHUB_STEP_SUMMARY
+        echo "- **Python**: 3.12" >> $GITHUB_STEP_SUMMARY
+        echo "- **Architecture**: aarch64/ARM64" >> $GITHUB_STEP_SUMMARY
+        
+    - name: Show platform info
+      run: |
+        echo "🏗️ Platform Information:"
+        uname -a
+        arch
+        python --version
+        pip --version
