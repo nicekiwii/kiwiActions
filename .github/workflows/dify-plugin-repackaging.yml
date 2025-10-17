@@ -24,31 +24,38 @@ jobs:
         
     - name: Git clone dify-plugin-repackaging-plus
       run: |
+        echo "✅ start clone"
+        pwd
+        ls -lah
         dify_plugin_info="${{ github.event.inputs.dify_plugin_info }}"
         mkdir -p ~/dify/
         cd ~/dify/
+        pwd
         git clone https://github.com/nicekiwii/dify-plugin-repackaging-plus.git
         cd dify-plugin-repackaging-plus
         chmod +x plugin_repackaging.sh
         ./plugin_repackaging.sh market "$dify_plugin_info"
-        ls -ah
+        ls -lah
         pwd
       
     - name: Create dify plugin archive
       run: |
         pwd
         cd ~/dify/dify-plugin-repackaging-plus/
-        ls -ah
+        ls -lah
         # 压缩当前目录下所有.difypkg文件到dify_plugin.zip
         zip dify_plugin.zip *.difypkg
+        echo "ls -ah"
+        ls -lah
         echo "✅ dify_plugin.zip completed!"
+        pwd
                
     - name: Upload  dify plugin archive
       uses: actions/upload-artifact@v4
       with:
-        name: dify_plugin.zip
+        name: dify_plugin
         path: |
-          dify_plugin.zip
+          ~/dify/dify-plugin-repackaging-plus/dify_plugin.zip
         retention-days: 5
         
     - name: Show platform info
@@ -60,4 +67,7 @@ jobs:
         pip --version
         pwd
         ls -lah
-        cat /etc/os-releases
+        cd ./
+        pwd
+        ls -lah
+        cat /etc/os-release
