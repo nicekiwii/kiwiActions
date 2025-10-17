@@ -31,12 +31,16 @@ jobs:
         cd dify-plugin-repackaging-plus
         chmod +x plugin_repackaging.sh
         ./plugin_repackaging.sh market "$dify_plugin_info"
+        ls -ah
+        pwd
       
     - name: Create dify plugin archive
       run: |
+        pwd
+        cd ~/dify/dify-plugin-repackaging-plus/
+        ls -ah
         # 压缩当前目录下所有.difypkg文件到dify_plugin.zip
         zip dify_plugin.zip *.difypkg
-        
         echo "✅ dify_plugin.zip completed!"
                
     - name: Upload  dify plugin archive
