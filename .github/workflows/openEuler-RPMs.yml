@@ -1,83 +1,90 @@
-name: Fetch and Package openEuler RPMs
+name: Download openEuler RPM Packages
 
 on:
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: '需要下载的软件包（空格分隔）'
+        required: true
+        default: 'screen tmux htop'
+        type: string
 
 jobs:
-  fetch-packages:
-    runs-on: ubuntu-latest
-
+  build-repo:
+    runs-on: ubuntu-22.04-arm
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: 启动openEuler容器并保持运行
+        run: |
+          # 使用--init确保容器正确处理信号，避免意外退出
+          docker run --rm --name openeuler-pkg-downloader -d \
+            --platform linux/arm64 \
+            --init \
+            openeuler/openeuler:22.03 \
+            /bin/sh -c "while true; do sleep 3600; done"  # 持续运行容器
+          docker ps -a
+          docker inpect openeuler-pkg-downloader
+          # 等待容器初始化完成（最多等待30秒）
+          for i in {1..10}; do
+            if docker inspect -f '{{.State.Running}}' openeuler-pkg-downloader &> /dev/null; then
+              echo "容器已正常运行"
+              break
+            fi
+            echo "等待容器启动..."
+            sleep 3
+          done
 
-    - name: Setup Docker container with openEuler
-      run: |
-        docker run --rm --name openeuler-pkg-downloader -d \
-          --platform linux/arm64 \
-          openeuler/openeuler:22.03 \
-          /bin/bash -c "tail -f /dev/null"
-        docker ps -a
-      # 使用官方openEuler 22.03 ARM64容器作为下载环境:cite[1]
+      - name: 检查容器状态
+        run: |
+          if ! docker inspect -f '{{.State.Running}}' openeuler-pkg-downloader | grep -q "true"; then
+            echo "容器未正常运行，查看日志："
+            docker logs openeuler-pkg-downloader
+            exit 1
+          fi
 
-    - name: Install dependencies in container
-      run: |
-        docker exec openeuler-pkg-downloader bash -c "
-          dnf update -y
-          dnf install -y dnf-plugins-core yum-utils createrepo_c
-        "
+      - name: 初始化容器内环境
+        run: |
+          docker exec openeuler-pkg-downloader bash -c "
+            # 替换默认源为国内镜像（加速下载）
+            sed -i 's|repo.openeuler.org|mirrors.huaweicloud.com/openeuler|g' /etc/yum.repos.d/openEuler.repo
+            dnf clean all
+            dnf makecache
+            dnf update -y
+            dnf install -y dnf-plugins-core yum-utils createrepo_c
+          "
 
-    - name: Download screen package and dependencies
-      run: |
-        docker exec openeuler-pkg-downloader bash -c "
-          mkdir -p /tmp/rpms
-          cd /tmp/rpms
-          dnf download --resolve screen
-        "
+      - name: 创建下载目录
+        run: |
+          docker exec openeuler-pkg-downloader bash -c "
+            mkdir -p /packages/{rpms,repodata}
+          "
 
-    - name: Create local repository
-      run: |
-        docker exec openeuler-pkg-downloader bash -c "
-          cd /tmp/rpms
-          createrepo_c .
-        "
+      - name: 下载指定软件包及依赖
+        run: |
+          docker exec openeuler-pkg-downloader bash -c "
+            PACKAGES=(${INPUT_PACKAGES})
+            yumdownloader --resolve --destdir=/packages/rpms \"\${PACKAGES[@]}\"
+          "
+        env:
+          INPUT_PACKAGES: ${{ github.event.inputs.packages }}
 
-    - name: Copy RPMs from container
-      run: |
-        docker cp openeuler-pkg-downloader:/tmp/rpms ./offline-repo
+      - name: 生成本地仓库元数据
+        run: |
+          docker exec openeuler-pkg-downloader bash -c "
+            createrepo_c /packages/rpms
+          "
 
-    - name: Create installation script
-      run: |
-        cat > ./offline-repo/install.sh << 'EOF'
-        #!/bin/bash
-        # 在离线服务器上运行的安装脚本
-        
-        REPO_DIR=$(cd "$(dirname "$0")" && pwd)
-        
-        # 创建本地repo文件
-        cat > /etc/yum.repos.d/local-offline.repo << REPOEOF
-        [local-offline]
-        name=Local Offline Repository
-        baseurl=file://$REPO_DIR
-        enabled=1
-        gpgcheck=0
-        REPOEOF
-        
-        # 安装screen
-        dnf install --disablerepo=* --enablerepo=local-offline -y screen
-        
-        echo "Screen installation completed!"
-        EOF
-        
-        chmod +x ./offline-repo/install.sh
+      - name: 从容器复制文件到宿主
+        run: |
+          docker cp openeuler-pkg-downloader:/packages ./packages
+          tar -czf openeuler-packages.tar.gz ./packages
 
-    - name: Create archive
-      run: |
-        tar -czf openeuler-22.03-screen-offline-repo.tar.gz -C ./offline-repo .
+      - name: 停止容器
+        run: |
+          docker stop openeuler-pkg-downloader
 
-    - name: Upload offline repository artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: openeuler-screen-offline-repo
-        path: openeuler-22.03-screen-offline-repo.tar.gz
-        retention-days: 3
+      - name: 上传打包文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: openeuler-22.03-packages
+          path: openeuler-packages.tar.gz
+          retention-days: 3
