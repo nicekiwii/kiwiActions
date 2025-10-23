@@ -43,22 +43,22 @@ jobs:
       - name: 查询容器系统基本信息
         run: |
           echo "===== 查看内核信息 ====="
-          docker exec openeuler-pkg-downloader uname -ar
+          docker exec openeuler-pkg uname -ar
           
           echo -e "\n===== 查看操作系统版本 ====="
-          docker exec openeuler-pkg-downloader cat /etc/os-release
+          docker exec openeuler-pkg cat /etc/os-release
           
           echo -e "\n===== 查看原始yum仓库配置 ====="
-          docker exec openeuler-pkg-downloader cat /etc/yum.repos.d/openEuler.repo
+          docker exec openeuler-pkg cat /etc/yum.repos.d/openEuler.repo
           
           echo -e "\n===== 查看磁盘空间 ====="
-          docker exec openeuler-pkg-downloader df -h
+          docker exec openeuler-pkg df -h
           
           echo -e "\n===== 查看已启用的仓库 ====="
-          docker exec openeuler-pkg-downloader dnf repolist enabled
+          docker exec openeuler-pkg dnf repolist enabled
 
           echo -e "\n===== 查看容器信息 ====="
-          docker inspect openeuler-pkg-downloader
+          docker inspect openeuler-pkg
 
       - name: 初始化环境与仓库
         run: |
