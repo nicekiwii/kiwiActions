@@ -1,4 +1,4 @@
-name: Download openEuler RPM Packages
+name: Download openEuler Packages (With All Repos)
 
 on:
   workflow_dispatch:
@@ -13,59 +13,81 @@ jobs:
   build-repo:
     runs-on: ubuntu-22.04-arm
     steps:
-      - name: 启动openEuler容器并保持运行
+      - name: 启动openEuler容器
         run: |
-          # 使用--init确保容器正确处理信号，避免意外退出
           docker run --rm --name openeuler-pkg-downloader -d \
             --platform linux/arm64 \
             --init \
             openeuler/openeuler:22.03 \
-            /bin/sh -c "while true; do sleep 3600; done"  # 持续运行容器
-          docker ps -a
-          docker inspect openeuler-pkg-downloader
-          # 等待容器初始化完成（最多等待30秒）
+            /bin/sh -c "while true; do sleep 3600; done"
+          
+          # 等待容器启动
           for i in {1..10}; do
             if docker inspect -f '{{.State.Running}}' openeuler-pkg-downloader &> /dev/null; then
-              echo "容器已正常运行"
+              echo "容器已运行"
               break
             fi
-            echo "等待容器启动..."
             sleep 3
           done
 
-      - name: 检查容器状态
+      - name: 查询容器系统基本信息
         run: |
-          if ! docker inspect -f '{{.State.Running}}' openeuler-pkg-downloader | grep -q "true"; then
-            echo "容器未正常运行，查看日志："
-            docker logs openeuler-pkg-downloader
-            exit 1
-          fi
+          echo "===== 查看内核信息 ====="
+          docker exec openeuler-pkg-downloader uname -ar
+          
+          echo -e "\n===== 查看操作系统版本 ====="
+          docker exec openeuler-pkg-downloader cat /etc/os-release
+          
+          echo -e "\n===== 查看原始yum仓库配置 ====="
+          docker exec openeuler-pkg-downloader cat /etc/yum.repos.d/openEuler.repo
+          
+          echo -e "\n===== 查看磁盘空间 ====="
+          docker exec openeuler-pkg-downloader df -h
+          
+          echo -e "\n===== 查看已启用的仓库 ====="
+          docker exec openeuler-pkg-downloader dnf repolist enabled
 
-      - name: 初始化容器内环境
+          echo -e "\n===== 查看容器信息 ====="
+          docker inspect openeuler-pkg-downloader
+
+      - name: 替换仓库为国内镜像（保留所有仓库）
         run: |
           docker exec openeuler-pkg-downloader bash -c "
-            # 替换默认源为国内镜像（加速下载）
+            # 替换默认源为华为云镜像（保留所有仓库配置）
             sed -i 's|repo.openeuler.org|mirrors.huaweicloud.com/openeuler|g' /etc/yum.repos.d/openEuler.repo
+            
+            # 清理并重建缓存
             dnf clean all
             dnf makecache
-            dnf update -y
-            dnf install -y dnf-plugins-core yum-utils createrepo_c
           "
 
-      - name: 创建下载目录
+      - name: 查看替换后的仓库配置
+        run: |
+          echo "===== 替换后的yum仓库配置 ====="
+          docker exec openeuler-pkg-downloader cat /etc/yum.repos.d/openEuler.repo
+
+      - name: 安装必要工具
         run: |
           docker exec openeuler-pkg-downloader bash -c "
-            mkdir -p /packages/{rpms,repodata}
+            # 安装dnf-utils（替代yum-utils）和createrepo_c
+            dnf install -y dnf-utils createrepo_c
           "
 
-      - name: 下载指定软件包及依赖
+      - name: 下载软件包及依赖
         run: |
           docker exec openeuler-pkg-downloader bash -c "
+            mkdir -p /packages/rpms
             PACKAGES=(${INPUT_PACKAGES})
-            yumdownloader --resolve --destdir=/packages/rpms \"\${PACKAGES[@]}\"
+            # 使用dnf download下载指定包及所有依赖
+            dnf download --resolve --destdir=/packages/rpms \"\${PACKAGES[@]}\"
           "
         env:
           INPUT_PACKAGES: ${{ github.event.inputs.packages }}
+
+      - name: 查看下载的软件包列表
+        run: |
+          echo "===== 下载的RPM包列表 ====="
+          docker exec openeuler-pkg-downloader ls -lh /packages/rpms
 
       - name: 生成本地仓库元数据
         run: |
@@ -73,13 +95,10 @@ jobs:
             createrepo_c /packages/rpms
           "
 
-      - name: 从容器复制文件到宿主
+      - name: 打包仓库文件
         run: |
-          docker cp openeuler-pkg-downloader:/packages ./packages
+          docker cp openeuler-pkg-downloader:/packages ./
           tar -czf openeuler-packages.tar.gz ./packages
-
-      - name: 停止容器
-        run: |
           docker stop openeuler-pkg-downloader
 
       - name: 上传打包文件
