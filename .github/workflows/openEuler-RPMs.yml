@@ -1,0 +1,82 @@
+name: Fetch and Package openEuler RPMs
+
+on:
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  fetch-packages:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Docker container with openEuler
+      run: |
+        docker run --rm --name openeuler-pkg-downloader -d \
+          --platform linux/arm64 \
+          openeuler/openeuler:22.03 \
+          sleep 3600
+      # 使用官方openEuler 22.03 ARM64容器作为下载环境:cite[1]
+
+    - name: Install dependencies in container
+      run: |
+        docker exec openeuler-pkg-downloader bash -c "
+          dnf update -y
+          dnf install -y dnf-plugins-core yum-utils createrepo_c
+        "
+
+    - name: Download screen package and dependencies
+      run: |
+        docker exec openeuler-pkg-downloader bash -c "
+          mkdir -p /tmp/rpms
+          cd /tmp/rpms
+          dnf download --resolve screen
+        "
+
+    - name: Create local repository
+      run: |
+        docker exec openeuler-pkg-downloader bash -c "
+          cd /tmp/rpms
+          createrepo_c .
+        "
+
+    - name: Copy RPMs from container
+      run: |
+        docker cp openeuler-pkg-downloader:/tmp/rpms ./offline-repo
+
+    - name: Create installation script
+      run: |
+        cat > ./offline-repo/install.sh << 'EOF'
+        #!/bin/bash
+        # 在离线服务器上运行的安装脚本
+        
+        REPO_DIR=$(cd "$(dirname "$0")" && pwd)
+        
+        # 创建本地repo文件
+        cat > /etc/yum.repos.d/local-offline.repo << REPOEOF
+        [local-offline]
+        name=Local Offline Repository
+        baseurl=file://$REPO_DIR
+        enabled=1
+        gpgcheck=0
+        REPOEOF
+        
+        # 安装screen
+        dnf install --disablerepo=* --enablerepo=local-offline -y screen
+        
+        echo "Screen installation completed!"
+        EOF
+        
+        chmod +x ./offline-repo/install.sh
+
+    - name: Create archive
+      run: |
+        tar -czf openeuler-22.03-screen-offline-repo.tar.gz -C ./offline-repo .
+
+    - name: Upload offline repository artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: openeuler-screen-offline-repo
+        path: openeuler-22.03-screen-offline-repo.tar.gz
+        retention-days: 3
