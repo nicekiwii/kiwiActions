@@ -1,21 +1,31 @@
-name: Download openEuler Packages (With All Repos)
+name: OpenEuler RPM Package Downloader (Dual Mode)
 
 on:
   workflow_dispatch:
     inputs:
       packages:
-        description: '需要下载的软件包（空格分隔）'
+        description: '需要下载的软件包（空格分隔，例如：screen tmux htop）'
         required: true
         default: 'screen tmux htop'
         type: string
+      # 新增模式选择参数，默认同时生成两种方式
+      mode:
+        description: '生成方式（all=同时生成两种模式，repo=仅本地仓库模式，packages=仅纯包模式）'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - repo
+          - packages
 
 jobs:
-  build-repo:
+  download-and-package:
     runs-on: ubuntu-22.04-arm
     steps:
       - name: 启动openEuler容器
         run: |
-          docker run --rm --name openeuler-pkg-downloader -d \
+          docker run --rm --name openeuler-pkg -d \
             --platform linux/arm64 \
             --init \
             openeuler/openeuler:22.03 \
@@ -23,7 +33,7 @@ jobs:
           
           # 等待容器启动
           for i in {1..10}; do
-            if docker inspect -f '{{.State.Running}}' openeuler-pkg-downloader &> /dev/null; then
+            if docker inspect -f '{{.State.Running}}' openeuler-pkg &> /dev/null; then
               echo "容器已运行"
               break
             fi
@@ -50,60 +60,105 @@ jobs:
           echo -e "\n===== 查看容器信息 ====="
           docker inspect openeuler-pkg-downloader
 
-      - name: 替换仓库为国内镜像（保留所有仓库）
+      - name: 初始化环境与仓库
         run: |
-          docker exec openeuler-pkg-downloader bash -c "
-            # 替换默认源为华为云镜像（保留所有仓库配置）
+          docker exec openeuler-pkg bash -c "
+            # 替换国内源
             sed -i 's|repo.openeuler.org|mirrors.huaweicloud.com/openeuler|g' /etc/yum.repos.d/openEuler.repo
-            
-            # 清理并重建缓存
-            dnf clean all
-            dnf makecache
-          "
-
-      - name: 查看替换后的仓库配置
-        run: |
-          echo "===== 替换后的yum仓库配置 ====="
-          docker exec openeuler-pkg-downloader cat /etc/yum.repos.d/openEuler.repo
-
-      - name: 安装必要工具
-        run: |
-          docker exec openeuler-pkg-downloader bash -c "
-            # 安装dnf-utils（替代yum-utils）和createrepo_c
+            dnf clean all && dnf makecache
+            # 安装必要工具
             dnf install -y dnf-utils createrepo_c
+            # 创建工作目录
+            mkdir -p /workspace/{repo-mode,packages-mode}
           "
 
-      - name: 下载软件包及依赖
+      - name: 下载软件包（两种模式共用）
         run: |
-          docker exec openeuler-pkg-downloader bash -c "
-            mkdir -p /packages/rpms
+          docker exec openeuler-pkg bash -c "
             PACKAGES=(${INPUT_PACKAGES})
-            # 使用dnf download下载指定包及所有依赖
-            dnf download --resolve --destdir=/packages/rpms \"\${PACKAGES[@]}\"
+            # 下载包到共享目录
+            dnf download --resolve --destdir=/workspace/shared-rpms \"\${PACKAGES[@]}\"
+            # 复制到两种模式的目录
+            cp /workspace/shared-rpms/* /workspace/repo-mode/
+            cp /workspace/shared-rpms/* /workspace/packages-mode/
           "
         env:
           INPUT_PACKAGES: ${{ github.event.inputs.packages }}
 
-      - name: 查看下载的软件包列表
+      - name: 生成模式1（带本地仓库）
+        if: github.event.inputs.mode == 'all' || github.event.inputs.mode == 'repo'
         run: |
-          echo "===== 下载的RPM包列表 ====="
-          docker exec openeuler-pkg-downloader ls -lh /packages/rpms
-
-      - name: 生成本地仓库元数据
-        run: |
-          docker exec openeuler-pkg-downloader bash -c "
-            createrepo_c /packages/rpms
+          docker exec openeuler-pkg bash -c "
+            # 生成本地仓库元数据
+            createrepo_c /workspace/repo-mode
           "
 
-      - name: 打包仓库文件
+      - name: 生成使用说明文档
         run: |
-          docker cp openeuler-pkg-downloader:/packages ./
-          tar -czf openeuler-packages.tar.gz ./packages
-          docker stop openeuler-pkg-downloader
+          # 创建说明文档
+          cat > usage.md << EOF
+          # OpenEuler离线安装指南
 
-      - name: 上传打包文件
+          本压缩包包含两种使用模式，请根据需求选择：
+
+          ## 模式1：本地仓库模式（推荐，自动解决依赖）
+          包含所有软件包及仓库元数据，支持dnf直接安装：
+          1. 解压：tar -xzf openeuler-repo-mode.tar.gz -C /opt/local-repo
+          2. 配置仓库：
+             cat > /etc/yum.repos.d/local.repo << 'EOF'
+             [local-repo]
+             name=Local Repository
+             baseurl=file:///opt/local-repo/repo-mode
+             enabled=1
+             gpgcheck=0
+             EOF
+          3. 安装：dnf clean all && dnf install -y ${INPUT_PACKAGES}
+
+          ## 模式2：纯软件包模式（手动安装依赖）
+          仅包含软件包，需手动解决依赖顺序：
+          1. 解压：tar -xzf openeuler-packages-mode.tar.gz -C /opt/packages
+          2. 安装（需按依赖顺序，示例）：
+             cd /opt/packages/packages-mode
+             rpm -ivh xxx.rpm  # 先安装底层依赖
+             rpm -ivh ${INPUT_PACKAGES// /-*.rpm }  # 最后安装目标软件
+          EOF
+        env:
+          INPUT_PACKAGES: ${{ github.event.inputs.packages }}
+
+      - name: 打包两种模式文件
+        run: |
+          # 从容器复制文件到宿主
+          docker cp openeuler-pkg:/workspace ./
+          
+          # 打包模式1（带仓库）
+          if [[ "${{ github.event.inputs.mode }}" == "all" || "${{ github.event.inputs.mode }}" == "repo" ]]; then
+            tar -czf openeuler-repo-mode.tar.gz -C ./workspace repo-mode usage.md
+          fi
+          
+          # 打包模式2（纯包）
+          if [[ "${{ github.event.inputs.mode }}" == "all" || "${{ github.event.inputs.mode }}" == "packages" ]]; then
+            tar -czf openeuler-packages-mode.tar.gz -C ./workspace packages-mode usage.md
+          fi
+          
+          docker stop openeuler-pkg
+          pwd
+          ls -alh
+          cd ./
+          pwd
+          ls -alh
+
+      - name: 上传模式1产物（带仓库）
+        if: github.event.inputs.mode == 'all' || github.event.inputs.mode == 'repo'
         uses: actions/upload-artifact@v4
         with:
-          name: openeuler-22.03-packages
-          path: openeuler-packages.tar.gz
+          name: openeuler-repo-mode
+          path: openeuler-repo-mode.tar.gz
+          retention-days: 3
+
+      - name: 上传模式2产物（纯包）
+        if: github.event.inputs.mode == 'all' || github.event.inputs.mode == 'packages'
+        uses: actions/upload-artifact@v4
+        with:
+          name: openeuler-packages-mode
+          path: openeuler-packages-mode.tar.gz
           retention-days: 3
