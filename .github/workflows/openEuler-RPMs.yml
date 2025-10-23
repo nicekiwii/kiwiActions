@@ -39,6 +39,7 @@ jobs:
             fi
             sleep 3
           done
+          pwd
 
       - name: 查询容器系统基本信息
         run: |
@@ -59,6 +60,7 @@ jobs:
 
           echo -e "\n===== 查看容器信息 ====="
           docker inspect openeuler-pkg
+          pwd
 
       - name: 初始化环境与仓库
         run: |
@@ -71,6 +73,7 @@ jobs:
             # 创建工作目录
             mkdir -p /workspace/{repo-mode,packages-mode}
           "
+          pwd
 
       - name: 下载软件包（两种模式共用）
         run: |
@@ -82,16 +85,18 @@ jobs:
             cp /workspace/shared-rpms/* /workspace/repo-mode/
             cp /workspace/shared-rpms/* /workspace/packages-mode/
           "
+          pwd
         env:
           INPUT_PACKAGES: ${{ github.event.inputs.packages }}
 
-      - name: 生成模式1（带本地仓库）
+      - name: 生成模式（带本地仓库）
         if: github.event.inputs.mode == 'all' || github.event.inputs.mode == 'repo'
         run: |
           docker exec openeuler-pkg bash -c "
             # 生成本地仓库元数据
             createrepo_c /workspace/repo-mode
           "
+          pwd
 
       - name: 生成使用说明文档
         run: |
@@ -122,6 +127,7 @@ jobs:
              rpm -ivh xxx.rpm  # 先安装底层依赖
              rpm -ivh ${INPUT_PACKAGES// /-*.rpm }  # 最后安装目标软件
           EOF
+          pwd
         env:
           INPUT_PACKAGES: ${{ github.event.inputs.packages }}
 
@@ -129,6 +135,9 @@ jobs:
         run: |
           # 从容器复制文件到宿主
           docker cp openeuler-pkg:/workspace ./
+
+          # 关键修复：将 usage.md 复制到 workspace 目录下，确保 tar 能找到
+          cp usage.md ./workspace/
           
           # 打包模式1（带仓库）
           if [[ "${{ github.event.inputs.mode }}" == "all" || "${{ github.event.inputs.mode }}" == "repo" ]]; then
