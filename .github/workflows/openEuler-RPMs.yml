@@ -16,7 +16,8 @@ jobs:
         docker run --rm --name openeuler-pkg-downloader -d \
           --platform linux/arm64 \
           openeuler/openeuler:22.03 \
-          sleep 3600
+          /bin/bash -c "tail -f /dev/null"
+        docker ps -a
       # 使用官方openEuler 22.03 ARM64容器作为下载环境:cite[1]
 
     - name: Install dependencies in container
