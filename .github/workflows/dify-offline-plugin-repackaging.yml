@@ -69,5 +69,5 @@ jobs:
         ls -lah
         cd ./
         pwd
-        ls -lah && du -sh *
+        ls -lah
         cat /etc/os-release
