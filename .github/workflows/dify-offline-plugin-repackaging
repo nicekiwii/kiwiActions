@@ -1,0 +1,73 @@
+name: dify-offline-plugin-repackaging
+
+on:
+  workflow_dispatch:  # 允许手动触发
+    inputs:
+      dify_plugin_info:
+        description: '请填写插件信息，如langgenius openai_api_compatible 0.0.22'
+        required: true
+        default: 'langgenius openai_api_compatible 0.0.22'
+
+jobs:
+  Dify-plugin-repackaging-job:
+    runs-on: ubuntu-22.04-arm  # 使用 ARM64 架构的 Ubuntu 22.04
+    
+    steps:   
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.12"
+        
+    - name: Upgrade pip
+      run: |
+        python -m pip install --upgrade pip
+        
+    - name: Git clone dify-plugin-repackaging
+      run: |
+        echo "✅ start clone"
+        pwd
+        ls -lah && du -sh *
+        dify_plugin_info="${{ github.event.inputs.dify_plugin_info }}"
+        mkdir -p ~/dify/
+        cd ~/dify/
+        pwd
+        git clone https://github.com/nicekiwii/dify-plugin-repackaging.git
+        cd dify-plugin-repackaging
+        chmod +x plugin_repackaging.sh
+        ./plugin_repackaging.sh market "$dify_plugin_info"
+        ls -lah && du -sh *
+        pwd
+      
+    - name: Create dify plugin archive
+      run: |
+        pwd
+        cd ~/dify/dify-plugin-repackaging/
+        ls -lah && du -sh *
+        # 压缩当前目录下所有.difypkg文件到dify_plugin.zip
+        zip dify_plugin.zip *.difypkg
+        echo "ls -ah"
+        ls -lah && du -sh *
+        echo "✅ dify_plugin.zip completed!"
+        pwd
+               
+    - name: Upload  dify plugin archive
+      uses: actions/upload-artifact@v4
+      with:
+        name: dify_plugin
+        path: |
+          ~/dify/dify-plugin-repackaging/dify_plugin.zip
+        retention-days: 5
+        
+    - name: Show platform info
+      run: |
+        echo "🏗️ Platform Information:"
+        uname -ar
+        arch
+        python --version
+        pip --version
+        pwd
+        ls -lah && du -sh *
+        cd ./
+        pwd
+        ls -lah && du -sh *
+        cat /etc/os-release
