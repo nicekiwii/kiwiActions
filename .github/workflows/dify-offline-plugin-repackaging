@@ -1,4 +1,4 @@
-name: dify-offline-plugin-repackaging
+name: Dify offline plugin repackaging
 
 on:
   workflow_dispatch:  # 允许手动触发
