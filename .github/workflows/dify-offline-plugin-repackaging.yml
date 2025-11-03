@@ -26,7 +26,7 @@ jobs:
       run: |
         echo "✅ start clone"
         pwd
-        ls -lah && du -sh *
+        ls -lah
         dify_plugin_info="${{ github.event.inputs.dify_plugin_info }}"
         mkdir -p ~/dify/
         cd ~/dify/
@@ -35,18 +35,18 @@ jobs:
         cd dify-plugin-repackaging
         chmod +x plugin_repackaging.sh
         ./plugin_repackaging.sh market "$dify_plugin_info"
-        ls -lah && du -sh *
+        ls -lah
         pwd
       
     - name: Create dify plugin archive
       run: |
         pwd
         cd ~/dify/dify-plugin-repackaging/
-        ls -lah && du -sh *
+        ls -lah
         # 压缩当前目录下所有.difypkg文件到dify_plugin.zip
         zip dify_plugin.zip *.difypkg
         echo "ls -ah"
-        ls -lah && du -sh *
+        ls -lah
         echo "✅ dify_plugin.zip completed!"
         pwd
                
@@ -66,7 +66,7 @@ jobs:
         python --version
         pip --version
         pwd
-        ls -lah && du -sh *
+        ls -lah
         cd ./
         pwd
         ls -lah && du -sh *
