@@ -28,7 +28,7 @@ jobs:
 
         echo "Downloading packages: $PKGS"
 
-        docker run --rm -v $PWD/output:/out almalinux:9 bash -c "
+        docker run --rm -v $PWD/output:/out rockylinux:9 bash -c "
           dnf install -y epel-release dnf-plugins-core
           cd /out/rpms
 
