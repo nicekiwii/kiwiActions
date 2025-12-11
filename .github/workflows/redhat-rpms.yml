@@ -28,8 +28,10 @@ jobs:
 
         echo "Downloading packages: $PKGS"
 
-        docker run --rm -v $PWD/output:/out rockylinux:9 bash -c "
+        docker run --rm -v $PWD/output:/out registry.access.redhat.com/ubi9/ubi:latest bash -c "
+          dnf clean all && dnf makecache -y
           dnf install -y epel-release dnf-plugins-core
+          dnf install -y dnf-utils createrepo_c --nogpgcheck
           cd /out/rpms
 
           # 循环下载每一个 package
