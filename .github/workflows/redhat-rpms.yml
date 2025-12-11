@@ -1,142 +1,73 @@
-name: Download RHEL 9.6 arm64 Stress Offline Package
+name: Build Offline Packages for RHEL 9.6 ARM64
 
-# 手动触发，支持自定义软件包名称（默认stress）
 on:
   workflow_dispatch:
     inputs:
-      package_name:
-        description: '需要下载的离线软件包名称'
+      packages:
+        description: "要下载的软件包 (用逗号分隔，例如: stress,stress-ng,screen)"
         required: true
-        default: 'stress'
-        type: string
+        default: "stress,stress-ng,screen"
 
 jobs:
-  build-offline-package:
-    runs-on: ubuntu-22.04-arm  # 必须使用ARM架构运行器
+  build:
+    runs-on: ubuntu-latest
+
     steps:
-      # 步骤1：启动RHEL UBI 9 arm64容器（与RHEL 9.6兼容）
-      - name: Start RHEL UBI 9 arm64 Container
-        run: |
-          # 启动容器并保持运行
-          docker run --rm --name rhel9-pkg -d \
-            --platform linux/arm64 \
-            --init \
-            registry.access.redhat.com/ubi9/ubi:latest \
-            /bin/sh -c "while true; do sleep 3600; done"
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-          # 等待容器启动就绪（最多等待30秒）
-          for i in {1..10}; do
-            if docker inspect -f '{{.State.Running}}' rhel9-pkg &> /dev/null; then
-              echo "✅ RHEL UBI 9 Container started successfully"
-              break
-            fi
-            echo "⌛ Waiting for container to start... (attempt $i/10)"
-            sleep 3
+    - name: Prepare workspace
+      run: |
+        mkdir -p output/rpms
+        mkdir -p output/docs
+
+    - name: Download RPMs (RHEL 9.6 ARM64 compatible)
+      run: |
+        # 以逗号分隔输入的软件包列表
+        PKGS="${{ github.event.inputs.packages }}"
+
+        echo "Downloading packages: $PKGS"
+
+        docker run --rm -v $PWD/output:/out almalinux:9 bash -c "
+          dnf install -y epel-release dnf-plugins-core
+          cd /out/rpms
+
+          # 循环下载每一个 package
+          for p in ${PKGS//,/ }; do
+            echo 'Downloading:' \$p
+            mkdir -p /out/rpms/\$p
+            cd /out/rpms/\$p
+            dnf download --resolve --arch=aarch64 \$p || echo 'Package '\$p' not found'
+            ls -lah
+            cd /out/rpms
           done
+        "
 
-      # 步骤2：初始化容器环境（安装工具/配置源）
-      - name: Initialize Container Environment
-        run: |
-          docker exec rhel9-pkg bash -c "
-            # 清理缓存并更新源（UBI官方源）
-            dnf clean all && dnf makecache -y
-            # 安装下载依赖的工具（dnf-utils替代yum-utils）
-            dnf install -y dnf-utils createrepo_c --nogpgcheck
-            # 创建工作目录结构
-            mkdir -p /workspace/{rpms,docs}
-          "
-
-      # 步骤3：下载stress及所有依赖包
-      - name: Download Stress and Dependencies
-        run: |
-          docker exec rhel9-pkg bash -c "
-            # 从输入参数获取包名
-            TARGET_PACKAGE=${{ github.event.inputs.package_name }}
-            # 下载包及所有依赖到rpms目录
-            dnf download --resolve --destdir=/workspace/rpms \$TARGET_PACKAGE --nogpgcheck
-            # 生成已下载包列表（供离线安装核对）
-            ls -lh /workspace/rpms
-            ls -lh /workspace/rpms > /workspace/docs/package_list.txt
-            echo '✅ Downloaded packages list saved to package_list.txt'
-          "
-
-      # 步骤4：生成离线安装指导文档（包含两种安装方式）
-      - name: Generate Offline Install Guide
-        run: |
-          # 生成安装指南（覆盖所有场景）
-          cat > install_guide.md << 'EOF'
-          # Red Hat 9.6 arm64 Stress 离线安装指南
-          ## 一、环境说明
-          - 目标系统：Red Hat Enterprise Linux 9.6 (aarch64/arm64)
-          - 软件包：stress（含所有依赖）
-          - 安装方式：支持本地仓库（推荐）/纯RPM手动安装
-
-          ## 二、前置准备
-          1. 将压缩包 `rhel96-stress-offline.tar.gz` 上传到目标服务器（如 /root 目录）
-          2. 确保服务器无网络限制（离线环境），且权限足够（root用户）
-
-          ## 三、安装步骤
-          ### 方式1：本地仓库模式（推荐，自动解决依赖）
+    - name: Generate offline install guide
+      run: |
+        cat > output/docs/INSTALL_GUIDE.md << 'EOF'
+          # Offline Installation Guide for RHEL 9.6 ARM64
+          本压缩包包含多个适用于 **RHEL 9.6 ARM64 (aarch64)** 的离线安装 RPM 包。
+          这些 RPM 已自动解析依赖，可在无网络环境直接安装。
+          ---
+          ## 📦 1. 解压压缩包
           ```bash
-          # 1. 解压压缩包
-          tar -xzf rhel96-stress-offline.tar.gz -C /opt/stress-offline
+          unzip offline-packages.zip
+          cd offline-packages
+          sudo dnf install -y --nogpgcheck ./*.rpm
+          stress-ng --cpu 4 --timeout 10
+          stress --cpu 2
+          screen --version
+        EOF
 
-          # 2. 安装createrepo_c（若未安装）
-          cd /opt/stress-offline/rpms
-          rpm -ivh createrepo_c-*.rpm --nogpgcheck || echo "createrepo_c已安装"
+    - name: Create ZIP package
+      run: |
+        cd output
+        zip -r stress-offline.zip rpms docs
 
-          # 3. 生成本地仓库元数据
-          createrepo_c /opt/stress-offline/rpms
-
-          # 4. 创建本地repo配置文件
-          cat > /etc/yum.repos.d/stress-local.repo << 'REPO'
-          [stress-local]
-          name=Stress Local Repository (Offline)
-          baseurl=file:///opt/stress-offline/rpms
-          enabled=1
-          gpgcheck=0
-          skip_if_unavailable=1
-          REPO
-
-          # 5. 清理缓存并安装stress
-          dnf clean all && dnf install -y stress --nogpgcheck
-
-          ### 方式 2：纯 RPM 手动安装（无 dnf 时使用）
-          # 1. 解压压缩包
-          tar -xzf rhel96-stress-offline.tar.gz -C /opt/stress-offline
-
-          # 2. 进入包目录，按依赖顺序安装（示例，可根据package_list.txt调整）
-          cd /opt/stress-offline/rpms
-          # 先安装基础依赖（示例，实际以实际包为准）
-          rpm -ivh libattr-*.rpm --nogpgcheck
-          # 再安装stress主包
-          rpm -ivh stress-*.rpm --nogpgcheck
-          # 若依赖冲突，可加--nodeps --force（谨慎使用）
-          # rpm -ivh stress-*.rpm --nogpgcheck --nodeps --force
-
-          # 检查stress版本
-          stress --version
-
-          # 测试stress功能（启动2个CPU压力进程，运行60秒）
-          stress -c 2 -t 60
-          EOF
-      - name: Package Offline Files
-        run: |
-          # 从容器复制所有文件到宿主机器
-          docker cp rhel9-pkg:/workspace ./
-          # 复制安装指南到宿主工作目录
-          cp install_guide.md ./workspace/docs/
-          # 打包为最终压缩包
-          tar -czf rhel96-stress-offline.tar.gz -C ./workspace/.
-          # 停止容器
-          docker stop rhel9-pkg
-          # 验证打包结果
-          echo "✅ Final package created:"
-          ls -lh rhel96-stress-offline.tar.gz
-
-      - name: Upload Offline Package
-        uses: actions/upload-artifact@v4
-        with:
-          name: rhel96-stress-offline-package
-          path: rhel96-stress-offline.tar.gz
-          retention-days: 30 # 压缩包保留 30 天
+    - name: Upload as Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: stress-offline
+        path: output/stress-offline.zip
+        retention-days: 3
