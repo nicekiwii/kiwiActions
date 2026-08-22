@@ -1,0 +1,71 @@
+name: Export Docker Image via regctl
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_name:
+        description: 'Docker 镜像名称 (例如: quay.io/ascend/vllm-ascend:v0.23.0)'
+        required: true
+        default: 'quay.io/ascend/vllm-ascend:v0.23.0'
+      platform:
+        description: '目标架构平台'
+        required: true
+        default: 'linux/arm64'
+        type: choice
+        options:
+          - linux/amd64
+          - linux/arm64
+
+jobs:
+  export-image:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install regctl
+        run: |
+          curl -L https://github.com/regclient/regclient/releases/latest/download/regctl-linux-amd64 > regctl
+          chmod +x regctl
+          sudo mv regctl /usr/local/bin
+
+      - name: Export Docker Image
+        run: |
+          IMAGE="${{ github.event.inputs.image_name }}"
+          PLATFORM="${{ github.event.inputs.platform }}"
+          
+          # 从镜像名提取最后一部分作为文件名，替换非法字符
+          # 例如 quay.io/ascend/vllm-ascend:v0.23.0 -> vllm-ascend-v0.23.0.tar
+          BASE_NAME=$(echo "$IMAGE" | awk -F'/' '{print $NF}' | tr ':' '-')
+          TAR_NAME="${BASE_NAME}.tar"
+          
+          echo "TAR_NAME=$TAR_NAME" >> $GITHUB_ENV
+          echo "BASE_NAME=$BASE_NAME" >> $GITHUB_ENV
+          
+          echo "开始导出镜像 $IMAGE ($PLATFORM)..."
+          regctl image export --platform "$PLATFORM" --name "$IMAGE" "$IMAGE" "$TAR_NAME"
+
+      - name: Check and Split File if > 5GB
+        run: |
+          TAR_NAME="${{ env.TAR_NAME }}"
+          BASE_NAME="${{ env.BASE_NAME }}"
+          
+          # 获取文件大小（单位：字节）
+          FILE_SIZE=$(stat -c%s "$TAR_NAME")
+          FIVE_GB=$((5 * 1024 * 1024 * 1024))
+          
+          mkdir -p output_artifacts
+          
+          if [ $FILE_SIZE -gt $FIVE_GB ]; then
+            echo "文件大小为 $((FILE_SIZE / 1024 / 1024 / 1024)) GB，超过 5GB，开始按 3GB 进行切分..."
+            split -b 3G -d "$TAR_NAME" "output_artifacts/${BASE_NAME}.tar.part"
+            rm "$TAR_NAME"  # 释放硬盘空间
+          else
+            echo "文件未超过 5GB，直接移动至输出目录..."
+            mv "$TAR_NAME" output_artifacts/
+          fi
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BASE_NAME }}
+          path: output_artifacts/
+          retention-days: 3
