@@ -1,4 +1,4 @@
-name: Export Docker Image All
+name: Export Docker Image
 
 on:
   workflow_dispatch:
@@ -122,7 +122,7 @@ jobs:
             mv "$FILE_TO_PROCESS" output_files/
           fi
           
-          # 4. 动态生成 Release 文档 (支持智能判断是否需要合并和解密)
+          # 4. 动态生成 Release 文档
           cat <<EOF > release_notes.md
           ## 镜像导出信息
           - **镜像名称**: \`${{ github.event.inputs.image_name }}\`
@@ -174,54 +174,63 @@ jobs:
           FILE_PATH=$(ls output_files/* | head -n 1)
           FILENAME=$(basename "$FILE_PATH")
           
-          SERVER=$(curl -s https://api.gofile.io/servers | jq -r '.data.servers[0].name')
+          echo "请求 Gofile 服务器..."
+          # 增加回退机制应对接口变更
+          SERVER_RES=$(curl -s https://api.gofile.io/servers || curl -s https://api.gofile.io/getServer)
+          echo "服务器节点返回数据: $SERVER_RES"
+          
+          SERVER=$(echo "$SERVER_RES" | jq -r '.data.servers[0].name // .data.server // empty' 2>/dev/null)
+          if [ -z "$SERVER" ]; then
+            echo "::error title=Gofile API 解析失败::无法获取上传节点，可能是 GitHub Action 的 IP 被限制或 API 失效，详见上方返回数据。"
+            exit 1
+          fi
+          
+          echo "已获取可用节点: $SERVER ，正在上传..."
           RESPONSE=$(curl -s -F "file=@${FILE_PATH}" "https://${SERVER}.gofile.io/contents/uploadfile")
-          DOWNLOAD_PAGE=$(echo "$RESPONSE" | jq -r '.data.downloadPage')
+          echo "文件上传返回数据: $RESPONSE"
+          
+          DOWNLOAD_PAGE=$(echo "$RESPONSE" | jq -r '.data.downloadPage // empty' 2>/dev/null)
+          if [ -z "$DOWNLOAD_PAGE" ]; then
+            echo "::error title=Gofile 上传失败::未能获取到下载链接。"
+            exit 1
+          fi
           
           echo "=================================================="
           echo "🔗 Gofile 下载地址: ${DOWNLOAD_PAGE}"
           if [ "${{ env.IS_ENCRYPTED }}" = "true" ]; then
             echo "::notice title=Gofile 上传成功!::下载页面: ${DOWNLOAD_PAGE} | 解密密码: ${{ env.SECRET_PASS }}"
-            echo "🔑 AES 解密密码: ${{ env.SECRET_PASS }}"
-            echo "💡 下载后解密命令:"
-            echo "openssl enc -d -aes-256-cbc -pbkdf2 -in $FILENAME -out ${{ env.TAR_NAME }} -k '${{ env.SECRET_PASS }}'"
           else
             echo "::notice title=Gofile 上传成功!::下载页面: ${DOWNLOAD_PAGE}"
           fi
           echo "=================================================="
 
-      # ---------------- 选项 4：File.io (阅后即焚，支持多分卷) ----------------
+      # ---------------- 选项 4：File.io ----------------
       - name: Upload to File.io
         if: ${{ github.event.inputs.upload_target == 'file.io' }}
         run: |
           echo "=================================================="
-          if [ "${{ env.IS_ENCRYPTED }}" = "true" ]; then
-            echo "::notice title=File.io 上传完成 (已加密)!::请查看运行日志获取链接和密码。"
-            echo "🔥 File.io 上传完成 (阅后即焚) | 状态: [已加密]"
-            echo "🔑 AES 解密密码: ${{ env.SECRET_PASS }}"
-          else
-            echo "::notice title=File.io 上传完成 (未加密)!::请查看运行日志获取链接。"
-            echo "🔥 File.io 上传完成 (阅后即焚) | 状态: [未加密]"
-          fi
-          echo "--------------------------------------------------"
-          
           # 遍历所有分卷文件依次上传
           for file in output_files/*; do
             filename=$(basename "$file")
+            echo "开始上传: $filename"
+            
             RESPONSE=$(curl -s -F "file=@${file}" https://file.io/?expires=14d)
-            DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.link')
+            echo "File.io 返回数据: $RESPONSE"
+            
+            DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.link // empty' 2>/dev/null)
+            if [ -z "$DOWNLOAD_URL" ]; then
+              echo "::error title=File.io 上传失败::无法获取下载链接，可能是该文件太大或者 File.io 限制了 GitHub 的 IP，请查看上方返回数据排查。"
+              exit 1
+            fi
             
             echo "📦 分卷/文件: $filename"
             echo "🔗 下载链接: $DOWNLOAD_URL"
-            echo "📥 下载命令: curl -L '$DOWNLOAD_URL' -o '$filename'"
             echo "--------------------------------------------------"
           done
           
-          echo "💡 所有分卷下载完成后，处理命令:"
           if [ "${{ env.IS_ENCRYPTED }}" = "true" ]; then
-            echo "cat ${{ env.BASE_NAME }}.tar.enc.part* > ${{ env.BASE_NAME }}.tar.enc 2>/dev/null || true"
-            echo "openssl enc -d -aes-256-cbc -pbkdf2 -in ${{ env.BASE_NAME }}.tar.enc -out ${{ env.TAR_NAME }} -k '${{ env.SECRET_PASS }}'"
+            echo "::notice title=File.io 上传完成!::解密密码: ${{ env.SECRET_PASS }}"
           else
-            echo "cat ${{ env.BASE_NAME }}.tar.part* > ${{ env.BASE_NAME }}.tar 2>/dev/null || true"
+            echo "::notice title=File.io 上传完成!::请检查 Actions 日志获取下载地址"
           fi
           echo "=================================================="
