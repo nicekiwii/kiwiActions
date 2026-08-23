@@ -1,4 +1,4 @@
-name: Export Docker Image
+name: Export Docker Image All
 
 on:
   workflow_dispatch:
@@ -175,21 +175,23 @@ jobs:
           FILENAME=$(basename "$FILE_PATH")
           
           echo "请求 Gofile 服务器..."
-          # 增加回退机制应对接口变更
-          SERVER_RES=$(curl -s https://api.gofile.io/servers || curl -s https://api.gofile.io/getServer)
+          # 加入 -L 自动跟随重定向
+          SERVER_RES=$(curl -sL https://api.gofile.io/servers || curl -sL https://api.gofile.io/getServer)
           echo "服务器节点返回数据: $SERVER_RES"
           
-          SERVER=$(echo "$SERVER_RES" | jq -r '.data.servers[0].name // .data.server // empty' 2>/dev/null)
+          # 加入 || true 容错，防止 API 返回 502 HTML 导致 jq 崩溃
+          SERVER=$(echo "$SERVER_RES" | jq -r '.data.servers[0].name // .data.server // empty' 2>/dev/null || true)
+          
           if [ -z "$SERVER" ]; then
-            echo "::error title=Gofile API 解析失败::无法获取上传节点，可能是 GitHub Action 的 IP 被限制或 API 失效，详见上方返回数据。"
+            echo "::error title=Gofile API 异常::无法获取上传节点。Gofile 服务器可能暂时宕机 (502) 或触发了 IP 限制。"
             exit 1
           fi
           
           echo "已获取可用节点: $SERVER ，正在上传..."
-          RESPONSE=$(curl -s -F "file=@${FILE_PATH}" "https://${SERVER}.gofile.io/contents/uploadfile")
+          RESPONSE=$(curl -sL -F "file=@${FILE_PATH}" "https://${SERVER}.gofile.io/contents/uploadfile")
           echo "文件上传返回数据: $RESPONSE"
           
-          DOWNLOAD_PAGE=$(echo "$RESPONSE" | jq -r '.data.downloadPage // empty' 2>/dev/null)
+          DOWNLOAD_PAGE=$(echo "$RESPONSE" | jq -r '.data.downloadPage // empty' 2>/dev/null || true)
           if [ -z "$DOWNLOAD_PAGE" ]; then
             echo "::error title=Gofile 上传失败::未能获取到下载链接。"
             exit 1
@@ -214,12 +216,15 @@ jobs:
             filename=$(basename "$file")
             echo "开始上传: $filename"
             
-            RESPONSE=$(curl -s -F "file=@${file}" https://file.io/?expires=14d)
+            # 加入 -L 参数，解决 301 Moved Permanently 报错
+            RESPONSE=$(curl -sL -F "file=@${file}" https://file.io/?expires=14d)
             echo "File.io 返回数据: $RESPONSE"
             
-            DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.link // empty' 2>/dev/null)
+            # 加入 || true 防止 jq 在返回 HTML 时崩溃
+            DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.link // empty' 2>/dev/null || true)
+            
             if [ -z "$DOWNLOAD_URL" ]; then
-              echo "::error title=File.io 上传失败::无法获取下载链接，可能是该文件太大或者 File.io 限制了 GitHub 的 IP，请查看上方返回数据排查。"
+              echo "::error title=File.io 上传失败::无法获取下载链接。可能是该文件太大或者接口发生了限流，请查看上方返回数据排查。"
               exit 1
             fi
             
