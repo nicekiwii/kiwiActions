@@ -1,0 +1,227 @@
+name: Export Docker Image All
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_name:
+        description: 'Docker 镜像名称 (例如: nginx:alpine 或 quay.io/ascend/vllm-ascend:v0.23.0)'
+        required: true
+        default: 'nginx:alpine'
+      platform:
+        description: '目标架构平台'
+        required: true
+        default: 'linux/arm64'
+        type: choice
+        options:
+          - linux/amd64
+          - linux/arm64
+      upload_target:
+        description: '选择制品上传目标'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - artifact
+          - gofile
+          - file.io
+      encrypt_image:
+        description: '是否使用 AES-256 进行加密'
+        required: true
+        default: 'no'
+        type: choice
+        options:
+          - 'yes'
+          - 'no'
+
+jobs:
+  export-and-upload:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 授予写入 Release 的权限
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies (regctl, jq, openssl)
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq openssl
+          ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+          curl -L "https://github.com/regclient/regclient/releases/latest/download/regctl-linux-${ARCH}" -o regctl
+          chmod +x regctl
+          sudo mv regctl /usr/local/bin/
+
+      - name: Export Docker Image & Prepare Metadata
+        run: |
+          IMAGE="${{ github.event.inputs.image_name }}"
+          PLATFORM="${{ github.event.inputs.platform }}"
+          
+          # 提取安全的文件名
+          BASE_NAME=$(echo "$IMAGE" | awk -F'/' '{print $NF}' | tr ':' '-')
+          TAR_NAME="${BASE_NAME}.tar"
+          BUILD_TIME=$(date -u -d '+8 hour' +'%Y-%m-%d %H:%M:%S CST')
+          
+          echo "TAR_NAME=$TAR_NAME" >> $GITHUB_ENV
+          echo "BASE_NAME=$BASE_NAME" >> $GITHUB_ENV
+          echo "BUILD_TIME=$BUILD_TIME" >> $GITHUB_ENV
+          
+          echo "开始导出镜像 $IMAGE ($PLATFORM)..."
+          regctl image export --platform "$PLATFORM" --name "$IMAGE" "$IMAGE" "$TAR_NAME"
+
+      - name: Process, Encrypt & Split Files
+        run: |
+          TARGET="${{ github.event.inputs.upload_target }}"
+          ENCRYPT_CHOICE="${{ github.event.inputs.encrypt_image }}"
+          FILE_TO_PROCESS="$TAR_NAME"
+          FINAL_EXT=".tar"
+          
+          # 1. 判断并执行 AES-256 加密
+          if [ "$ENCRYPT_CHOICE" = "yes" ]; then
+            SECRET_PASS=$(openssl rand -base64 12)
+            ENC_TAR_NAME="${TAR_NAME}.enc"
+            
+            echo "用户选择加密，正在对镜像进行 AES-256-CBC 加密..."
+            openssl enc -aes-256-cbc -salt -pbkdf2 -in "$TAR_NAME" -out "$ENC_TAR_NAME" -k "$SECRET_PASS"
+            
+            rm "$TAR_NAME" # 删掉原文件省空间
+            FILE_TO_PROCESS="$ENC_TAR_NAME"
+            FINAL_EXT=".tar.enc"
+            
+            echo "SECRET_PASS=$SECRET_PASS" >> $GITHUB_ENV
+            echo "IS_ENCRYPTED=true" >> $GITHUB_ENV
+            echo "::notice title=加密已开启!::文件已使用 AES-256 加密。解密密码为: $SECRET_PASS"
+          else
+            echo "用户选择不加密，跳过加密步骤..."
+            echo "IS_ENCRYPTED=false" >> $GITHUB_ENV
+          fi
+
+          mkdir -p output_files
+          FILE_SIZE=$(stat -c%s "$FILE_TO_PROCESS")
+          
+          # 2. 动态分卷逻辑判断
+          DO_SPLIT=false
+          if [ "$TARGET" = "release" ]; then
+            LIMIT=$((2 * 1024 * 1024 * 1024)) # 2GB
+            if [ $FILE_SIZE -gt $LIMIT ]; then DO_SPLIT=true; SPLIT_SIZE="1800M"; fi
+          elif [ "$TARGET" = "artifact" ]; then
+            LIMIT=$((5 * 1024 * 1024 * 1024)) # 5GB
+            if [ $FILE_SIZE -gt $LIMIT ]; then DO_SPLIT=true; SPLIT_SIZE="3G"; fi
+          elif [ "$TARGET" = "file.io" ]; then
+            LIMIT=$((3500 * 1024 * 1024)) # File.io 容错线设为 3.5GB
+            if [ $FILE_SIZE -gt $LIMIT ]; then DO_SPLIT=true; SPLIT_SIZE="3G"; fi
+          fi
+
+          # 3. 执行分卷或移动
+          if [ "$DO_SPLIT" = true ]; then
+            echo "文件超过平台限制，开始按 ${SPLIT_SIZE} 分卷切分..."
+            split -b "$SPLIT_SIZE" -d "$FILE_TO_PROCESS" "output_files/${BASE_NAME}${FINAL_EXT}.part"
+            rm "$FILE_TO_PROCESS"
+          else
+            echo "文件未超限，直接移动..."
+            mv "$FILE_TO_PROCESS" output_files/
+          fi
+          
+          # 4. 动态生成 Release 文档 (支持智能判断是否需要合并和解密)
+          cat <<EOF > release_notes.md
+          ## 镜像导出信息
+          - **镜像名称**: \`${{ github.event.inputs.image_name }}\`
+          - **平台架构**: \`${{ github.event.inputs.platform }}\`
+          - **导出时间**: \`${BUILD_TIME}\`
+          EOF
+          
+          if [ "$ENCRYPT_CHOICE" = "yes" ]; then
+            echo "- **加密状态**: 已开启 (AES-256)" >> release_notes.md
+            echo "- **解密密码**: \`${SECRET_PASS}\`" >> release_notes.md
+          fi
+          echo "" >> release_notes.md
+          
+          if [ "$DO_SPLIT" = true ]; then
+            echo "> **提示**：检测到文件较大，已自动分卷。下载后使用以下命令合并：" >> release_notes.md
+            echo "> \`cat ${BASE_NAME}${FINAL_EXT}.part* > ${BASE_NAME}${FINAL_EXT}\`" >> release_notes.md
+          fi
+          
+          if [ "$ENCRYPT_CHOICE" = "yes" ]; then
+            echo "> **解密命令**：" >> release_notes.md
+            echo "> \`openssl enc -d -aes-256-cbc -pbkdf2 -in ${BASE_NAME}${FINAL_EXT} -out ${TAR_NAME} -k '${SECRET_PASS}'\`" >> release_notes.md
+          fi
+
+      # ---------------- 选项 1：GitHub Releases ----------------
+      - name: Publish to GitHub Release
+        if: ${{ github.event.inputs.upload_target == 'release' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.BASE_NAME }}
+          name: "Docker Image: ${{ github.event.inputs.image_name }}"
+          body_path: release_notes.md
+          files: output_files/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---------------- 选项 2：Actions Artifacts ----------------
+      - name: Upload Artifact
+        if: ${{ github.event.inputs.upload_target == 'artifact' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BASE_NAME }}
+          path: output_files/
+          retention-days: 3
+
+      # ---------------- 选项 3：Gofile.io ----------------
+      - name: Upload to Gofile.io
+        if: ${{ github.event.inputs.upload_target == 'gofile' }}
+        run: |
+          FILE_PATH=$(ls output_files/* | head -n 1)
+          FILENAME=$(basename "$FILE_PATH")
+          
+          SERVER=$(curl -s https://api.gofile.io/servers | jq -r '.data.servers[0].name')
+          RESPONSE=$(curl -s -F "file=@${FILE_PATH}" "https://${SERVER}.gofile.io/contents/uploadfile")
+          DOWNLOAD_PAGE=$(echo "$RESPONSE" | jq -r '.data.downloadPage')
+          
+          echo "=================================================="
+          echo "🔗 Gofile 下载地址: ${DOWNLOAD_PAGE}"
+          if [ "${{ env.IS_ENCRYPTED }}" = "true" ]; then
+            echo "::notice title=Gofile 上传成功!::下载页面: ${DOWNLOAD_PAGE} | 解密密码: ${{ env.SECRET_PASS }}"
+            echo "🔑 AES 解密密码: ${{ env.SECRET_PASS }}"
+            echo "💡 下载后解密命令:"
+            echo "openssl enc -d -aes-256-cbc -pbkdf2 -in $FILENAME -out ${{ env.TAR_NAME }} -k '${{ env.SECRET_PASS }}'"
+          else
+            echo "::notice title=Gofile 上传成功!::下载页面: ${DOWNLOAD_PAGE}"
+          fi
+          echo "=================================================="
+
+      # ---------------- 选项 4：File.io (阅后即焚，支持多分卷) ----------------
+      - name: Upload to File.io
+        if: ${{ github.event.inputs.upload_target == 'file.io' }}
+        run: |
+          echo "=================================================="
+          if [ "${{ env.IS_ENCRYPTED }}" = "true" ]; then
+            echo "::notice title=File.io 上传完成 (已加密)!::请查看运行日志获取链接和密码。"
+            echo "🔥 File.io 上传完成 (阅后即焚) | 状态: [已加密]"
+            echo "🔑 AES 解密密码: ${{ env.SECRET_PASS }}"
+          else
+            echo "::notice title=File.io 上传完成 (未加密)!::请查看运行日志获取链接。"
+            echo "🔥 File.io 上传完成 (阅后即焚) | 状态: [未加密]"
+          fi
+          echo "--------------------------------------------------"
+          
+          # 遍历所有分卷文件依次上传
+          for file in output_files/*; do
+            filename=$(basename "$file")
+            RESPONSE=$(curl -s -F "file=@${file}" https://file.io/?expires=14d)
+            DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.link')
+            
+            echo "📦 分卷/文件: $filename"
+            echo "🔗 下载链接: $DOWNLOAD_URL"
+            echo "📥 下载命令: curl -L '$DOWNLOAD_URL' -o '$filename'"
+            echo "--------------------------------------------------"
+          done
+          
+          echo "💡 所有分卷下载完成后，处理命令:"
+          if [ "${{ env.IS_ENCRYPTED }}" = "true" ]; then
+            echo "cat ${{ env.BASE_NAME }}.tar.enc.part* > ${{ env.BASE_NAME }}.tar.enc 2>/dev/null || true"
+            echo "openssl enc -d -aes-256-cbc -pbkdf2 -in ${{ env.BASE_NAME }}.tar.enc -out ${{ env.TAR_NAME }} -k '${{ env.SECRET_PASS }}'"
+          else
+            echo "cat ${{ env.BASE_NAME }}.tar.part* > ${{ env.BASE_NAME }}.tar 2>/dev/null || true"
+          fi
+          echo "=================================================="
